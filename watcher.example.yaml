@@ -1,0 +1,38 @@
+# watcher.yaml — SLURM node watcher configuration
+# Copy to watcher.yaml and adjust to your cluster.
+
+# SSH target for running sinfo/scontrol remotely (optional; omit for local)
+login_host: "login01.your-cluster.example.com"
+
+# Polling interval in seconds
+poll_interval_seconds: 300
+
+# Slack webhook for drain alerts (optional)
+slack_webhook: ""
+
+# Drain policies — evaluated top-to-bottom; first match wins
+drain_policies:
+
+  # Auto-drain nodes reporting XID GPU errors
+  - name: xid_error
+    enabled: true
+    reason_pattern: "XID|gpu_error|nvidia_xid"
+    drain_reason: "auto-drain: GPU XID error detected [{matched_reason}]"
+
+  # Auto-drain nodes stuck in FAIL state
+  - name: fail_state
+    enabled: true
+    state_pattern: "^fail"
+    drain_reason: "auto-drain: SLURM node in FAIL state"
+
+  # Auto-drain on hardware fault messages
+  - name: hw_fault
+    enabled: true
+    reason_pattern: "hardware_fault|hw_err|dimm|mcelog|correctable_error"
+    drain_reason: "auto-drain: hardware fault [{matched_reason}]"
+
+  # Auto-drain on not-responding nodes
+  - name: not_responding
+    enabled: false         # enable if you want aggressive cleanup
+    state_pattern: "down\*"
+    drain_reason: "auto-drain: node not responding"
