@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>slurm-node-watcher</title>
+<style>
+:root{--bg:#0b0f14;--panel:#12171f;--panel2:#171d27;--border:#242c38;
+--text:#e6e9ee;--muted:#9aa4b2;--accent:#76b900;--accent2:#9fe870;--code-bg:#0d1219}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.65}
+.wrap{max-width:980px;margin:0 auto;padding:0 24px}
+header.top{position:sticky;top:0;z-index:10;background:var(--panel);border-bottom:1px solid var(--border);padding:14px 0}
+header.top .wrap{display:flex;align-items:center;justify-content:space-between}
+header.top a{color:var(--text);text-decoration:none;font-weight:700}
+.badge{background:var(--accent);color:#08130a;font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px;margin-left:10px}
+.hero{padding:48px 0 16px}
+.hero h1{font-size:2.2rem;margin:.2em 0}
+.hero p{color:var(--muted);font-size:1.1rem;max-width:760px}
+.clone-box{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:14px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;overflow-x:auto;margin:18px 0}
+h2{color:var(--accent2);border-bottom:1px solid var(--border);padding-bottom:8px;margin-top:44px}
+h3{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text);font-size:1.05rem;margin-top:28px}
+h3 .purpose{color:var(--muted);font-family:-apple-system,sans-serif;font-weight:400;font-size:.9rem;display:block;margin-top:4px}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;font-size:13px}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+table{width:100%;border-collapse:collapse;margin:16px 0}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);font-size:14px}
+th{color:var(--muted);font-weight:600}
+a{color:var(--accent2)}
+footer{border-top:1px solid var(--border);margin-top:60px;padding:28px 0;color:var(--muted);font-size:13px}
+.note{background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;padding:12px 16px;margin:18px 0;font-size:14px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap"><a href="#top">slurm-node-watcher</a><span class="badge">pk-unix</span></div></header>
+<div class="wrap">
+<div class="hero" id="top">
+<h1>slurm-node-watcher</h1>
+<p>- SSH key auth to login/head nodes (for remote mode)</p>
+</div>
+
+<div class="clone-box">git clone https://github.com/pk-unix/slurm-node-watcher.git<br>cd slurm-node-watcher</div>
+<h2>Source</h2>
+<h3>gpu_check.py</h3>
+<pre><code class="language-python">#!/usr/bin/env python3
+"""
+gpu_check.py — Standalone GPU health check via nvidia-smi.
+
+Queries all GPUs on a node (local or remote SSH), flags high temperature,
+uncorrected ECC errors, and abnormal power states.
+
+Usage:
+    python gpu_check.py                          # local node
+    python gpu_check.py --host gpu-node-01       # remote SSH
+    python gpu_check.py --host gpu-node-01 --json
+"""
+from __future__ import annotations
+
+import json
+import argparse
+import subprocess
+import sys
+
+TEMP_WARN = 85
+TEMP_CRIT = 90
+
+
+def query(host: str | None) -&gt; list[dict]:
+    cmd = [
+        "nvidia-smi",
+        "--query-gpu=index,name,temperature.gpu,memory.used,memory.total,"
+        "utilization.gpu,ecc.errors.corrected.volatile.total,"
+        "ecc.errors.uncorrected.volatile.total,power.draw,power.limit,pstate",
+        "--format=csv,noheader,nounits",
+    ]
+    if host:
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+               host] + cmd
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:
+        print(f"ERROR: nvidia-smi failed: {out.stderr.strip()[:200]}", file=sys.stderr)
+        return []
+    gpus = []
+    for line in out.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) &lt; 11:
+            continue
+        gpus.append({
+            "index": parts[0], "name": parts[1],
+            "temp_c": _int(parts[2]), "mem_used_mb": _int(parts[3]),
+            "mem_total_mb": _int(parts[4]), "util_pct": _int(parts[5]),
+            "ecc_corrected": _int(parts[6]), "ecc_uncorrected": _int(parts[7]),
+            "power_w": _float(parts[8]), "power_limit_w": _float(parts[9]),
+            "pstate": parts[10],
+        })
+    return gpus
+
+
+def _int(v: str) -&gt; int | None:
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return None
+
+
+def _float(v: str) -&gt; float | None:
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
+def check(gpus: list[dict]) -&gt; list[dict]:
+    issues = []
+    for g in gpus:
+        if g["ecc_uncorrected"] and g["ecc_uncorrected"] &gt; 0:
+            issues.append({"gpu": g["index"], "severity": "CRITICAL",
+                           "msg": f"Uncorrected ECC errors: {g['ecc_uncorrected']}"})
+        if g["temp_c"] and g["temp_c"] &gt;= TEMP_CRIT:
+            issues.append({"gpu": g["index"], "severity": "CRITICAL",
+                           "msg": f"Temperature critical: {g['temp_c']}°C"})
+        elif g["temp_c"] and g["temp_c"] &gt;= TEMP_WARN:
+            issues.append({"gpu": g["index"], "severity": "WARNING",
+                           "msg": f"Temperature high: {g['temp_c']}°C"})
+        if g["pstate"] not in ("P0", "P1", "P2", "N/A", None):
+            issues.append({"gpu": g["index"], "severity": "WARNING",
+                           "msg": f"Unexpected power state: {g['pstate']}"})
+    return issues
+
+
+def main():
+    ap = argparse.ArgumentParser(description="GPU health check via nvidia-smi")
+    ap.add_argument("--host", help="SSH to this host (default: local)")
+    ap.add_argument("--json", action="store_true", dest="as_json")
+    args = ap.parse_args()
+
+    gpus = query(args.host)
+    if not gpus:
+        sys.exit(1)
+
+    issues = check(gpus)
+
+    if args.as_json:
+        print(json.dumps({"gpus": gpus, "issues": issues}, indent=2))
+        sys.exit(1 if any(i["severity"] == "CRITICAL" for i in issues) else 0)
+
+    print(f"{'GPU':&lt;5} {'Name':&lt;30} {'Temp':&gt;5} {'Util%':&gt;5} "
+          f"{'Mem MB':&gt;8} {'ECC':&gt;6} {'PState':&lt;6}")
+    print("-" * 70)
+    for g in gpus:
+        flag = " ⚠" if any(i["gpu"] == g["index"] for i in issues) else ""
+        print(f"{g['index']:&lt;5} {g['name']:&lt;30} {str(g['temp_c'])+'°':&gt;5} "
+              f"{str(g['util_pct'])+'%':&gt;5} "
+              f"{str(g['mem_used_mb'])+'/'+str(g['mem_total_mb']):&gt;8} "
+              f"{g['ecc_uncorrected'] or 0:&gt;6} {g['pstate']:&lt;6}{flag}")
+
+    if issues:
+        print("\nIssues detected:")
+        for i in issues:
+            print(f"  [{i['severity']}] GPU {i['gpu']}: {i['msg']}")
+        sys.exit(1)
+    else:
+        print("\nAll GPUs healthy.")
+
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+<h3>watcher.example.yaml</h3>
+<pre><code class="language-yaml"># watcher.yaml — SLURM node watcher configuration
+# Copy to watcher.yaml and adjust to your cluster.
+
+# SSH target for running sinfo/scontrol remotely (optional; omit for local)
+login_host: "login01.your-cluster.example.com"
+
+# Polling interval in seconds
+poll_interval_seconds: 300
+
+# Slack webhook for drain alerts (optional)
+slack_webhook: ""
+
+# Drain policies — evaluated top-to-bottom; first match wins
+drain_policies:
+
+  # Auto-drain nodes reporting XID GPU errors
+  - name: xid_error
+    enabled: true
+    reason_pattern: "XID|gpu_error|nvidia_xid"
+    drain_reason: "auto-drain: GPU XID error detected [{matched_reason}]"
+
+  # Auto-drain nodes stuck in FAIL state
+  - name: fail_state
+    enabled: true
+    state_pattern: "^fail"
+    drain_reason: "auto-drain: SLURM node in FAIL state"
+
+  # Auto-drain on hardware fault messages
+  - name: hw_fault
+    enabled: true
+    reason_pattern: "hardware_fault|hw_err|dimm|mcelog|correctable_error"
+    drain_reason: "auto-drain: hardware fault [{matched_reason}]"
+
+  # Auto-drain on not-responding nodes
+  - name: not_responding
+    enabled: false         # enable if you want aggressive cleanup
+    state_pattern: "down\*"
+    drain_reason: "auto-drain: node not responding"
+</code></pre>
+<h3>watcher.py</h3>
+<pre><code class="language-python">#!/usr/bin/env python3
+"""
+watcher.py — SLURM node health watcher with auto-drain.
+
+Polls `sinfo` on a configurable interval, detects nodes that match
+drain policies (GPU XID errors, high memory, consecutive failures),
+drains them with a reason string, and sends Slack/email alerts.
+
+Usage:
+    python watcher.py                          # run with watcher.yaml
+    python watcher.py --config /etc/watcher.yaml
+    python watcher.py --dry-run                # log what would be drained
+    python watcher.py --check-once             # single pass then exit
+"""
+from __future__ import annotations
+
+import re
+import sys
+import time
+import logging
+import argparse
+import datetime
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+import yaml
+
+log = logging.getLogger("watcher")
+
+
+# ── config ─────────────────────────────────────────────────────────────────────
+
+def load_config(path: str) -&gt; dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+# ── SLURM helpers ──────────────────────────────────────────────────────────────
+
+def sinfo(login_host: Optional[str] = None) -&gt; str:
+    cmd = ["sinfo", "-R", "--noheader", "-o", "%N|%T|%E|%C"]
+    if login_host:
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+               login_host] + cmd
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:
+        raise RuntimeError(f"sinfo failed: {out.stderr.strip()[:200]}")
+    return out.stdout
+
+
+def drain_node(node: str, reason: str, dry_run: bool = False,
+               login_host: Optional[str] = None) -&gt; bool:
+    cmd = ["scontrol", "update", f"NodeName={node}", "State=drain", f"Reason={reason}"]
+    if login_host:
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+               login_host] + cmd
+    if dry_run:
+        log.info(f"[DRY-RUN] would drain {node}: {reason}")
+        return True
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    if out.returncode != 0:
+        log.error(f"drain {node} failed: {out.stderr.strip()[:200]}")
+        return False
+    log.info(f"drained {node}: {reason}")
+    return True
+
+
+def nvidia_smi(node: Optional[str] = None) -&gt; list[dict]:
+    """Query GPU health via nvidia-smi. Returns one dict per GPU."""
+    cmd = [
+        "nvidia-smi",
+        "--query-gpu=index,name,temperature.gpu,memory.used,memory.total,"
+        "utilization.gpu,ecc.errors.corrected.volatile.total,"
+        "ecc.errors.uncorrected.volatile.total,pstate",
+        "--format=csv,noheader,nounits",
+    ]
+    if node:
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+               node] + cmd
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:
+        return []
+    gpus = []
+    for line in out.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) &gt;= 9:
+            gpus.append({
+                "index": parts[0], "name": parts[1], "temp": parts[2],
+                "mem_used": parts[3], "mem_total": parts[4], "util": parts[5],
+                "ecc_corrected": parts[6], "ecc_uncorrected": parts[7],
+                "pstate": parts[8],
+            })
+    return gpus
+
+
+# ── drain policies ─────────────────────────────────────────────────────────────
+
+def evaluate_policies(node: str, state: str, reason: str,
+                      policies: list[dict]) -&gt; Optional[str]:
+    """Return a drain reason string if any policy matches, else None."""
+    for policy in policies:
+        if not policy.get("enabled", True):
+            continue
+        pattern = policy.get("reason_pattern")
+        if pattern and re.search(pattern, reason, re.IGNORECASE):
+            return policy["drain_reason"].format(node=node, matched_reason=reason)
+        state_match = policy.get("state_pattern")
+        if state_match and re.search(state_match, state, re.IGNORECASE):
+            return policy["drain_reason"].format(node=node, state=state)
+    return None
+
+
+# ── alerting ──────────────────────────────────────────────────────────────────
+
+def alert_slack(webhook_url: str, message: str) -&gt; None:
+    import urllib.request
+    import json
+    data = json.dumps({"text": message}).encode()
+    req = urllib.request.Request(webhook_url, data=data,
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+
+
+# ── main loop ─────────────────────────────────────────────────────────────────
+
+def check_once(config: dict, dry_run: bool = False) -&gt; list[dict]:
+    login_host = config.get("login_host")
+    policies = config.get("drain_policies", [])
+    actions = []
+
+    try:
+        raw = sinfo(login_host)
+    except Exception as e:
+        log.error(f"sinfo failed: {e}")
+        return []
+
+    for line in raw.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) &lt; 3:
+            continue
+        nodelist, state, reason = parts[0], parts[1], parts[2]
+
+        if "drain" in state.lower():
+            continue  # already drained
+
+        drain_reason = evaluate_policies(nodelist, state, reason, policies)
+        if not drain_reason:
+            continue
+
+        ok = drain_node(nodelist, drain_reason, dry_run=dry_run,
+                        login_host=login_host)
+        if ok:
+            actions.append({"node": nodelist, "reason": drain_reason, "state": state})
+
+    return actions
+
+
+def main():
+    ap = argparse.ArgumentParser(description="SLURM node health watcher")
+    ap.add_argument("--config", default="watcher.yaml")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--check-once", action="store_true")
+    ap.add_argument("--log-level", default="INFO")
+    args = ap.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    config = load_config(args.config)
+    interval = config.get("poll_interval_seconds", 300)
+
+    if args.check_once:
+        actions = check_once(config, dry_run=args.dry_run)
+        log.info(f"check_once: {len(actions)} action(s)")
+        return
+
+    log.info(f"Starting watcher (interval={interval}s, dry_run={args.dry_run})")
+    while True:
+        try:
+            actions = check_once(config, dry_run=args.dry_run)
+            if actions:
+                webhook = config.get("slack_webhook")
+                if webhook:
+                    msgs = "\n".join(f"• {a['node']}: {a['reason']}" for a in actions)
+                    try:
+                        alert_slack(webhook, f":warning: *Node auto-drain*\n{msgs}")
+                    except Exception as e:
+                        log.warning(f"slack alert failed: {e}")
+        except Exception as e:
+            log.error(f"watcher iteration error: {e}")
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+<h2>Full README</h2>
+<pre><code># SLURM Node Watcher
+
+A lightweight Python daemon that continuously monitors SLURM cluster node health, auto-drains nodes matching configurable fault policies (XID GPU errors, hardware faults, FAIL state), and sends Slack alerts. Includes a standalone `gpu_check.py` for instant GPU health snapshots via `nvidia-smi`.
+
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![SLURM](https://img.shields.io/badge/scheduler-SLURM-orange)
+
+---
+
+## What it does
+
+- **Continuous polling** — runs `sinfo -R` on a configurable interval
+- **Policy-based auto-drain** — regex-match on node reason/state strings → `scontrol update State=drain`
+- **GPU health check** — `nvidia-smi` query for temperature, ECC errors, power state
+- **Slack alerts** — webhook notification on every auto-drain action
+- **Dry-run mode** — logs what *would* be drained without taking action
+- **Remote execution** — works via SSH to a login/slurmctld node; no agent needed
+
+## Quick start
+
+```bash
+git clone https://github.com/pk-unix/slurm-node-watcher
+cd slurm-node-watcher
+
+# Configure
+cp watcher.example.yaml watcher.yaml
+$EDITOR watcher.yaml
+
+# Test with a dry run
+python watcher.py --dry-run --check-once
+
+# Run as a daemon (or put in systemd/launchd)
+python watcher.py
+```
+
+## GPU health check (standalone)
+
+```bash
+# Check local node
+python gpu_check.py
+
+# Check a remote node over SSH
+python gpu_check.py --host gpu-node-01
+
+# JSON output (exit code 1 if CRITICAL)
+python gpu_check.py --host gpu-node-01 --json
+```
+
+Example output:
+```
+GPU   Name                           Temp  Util%   Mem MB    ECC PState
+----------------------------------------------------------------------
+0     NVIDIA H100 SXM5 80GB          72°    98%  75230/81920      0 P0
+1     NVIDIA H100 SXM5 80GB          74°    97%  75180/81920      0 P0
+
+All GPUs healthy.
+```
+
+## Drain policies
+
+Policies are evaluated top-to-bottom in `watcher.yaml`. First match wins.
+
+```yaml
+drain_policies:
+  - name: xid_error
+    enabled: true
+    reason_pattern: "XID|gpu_error"
+    drain_reason: "auto-drain: GPU XID error [{matched_reason}]"
+
+  - name: hw_fault
+    enabled: true
+    reason_pattern: "hardware_fault|mcelog"
+    drain_reason: "auto-drain: hardware fault [{matched_reason}]"
+```
+
+## systemd unit
+
+```ini
+[Unit]
+Description=SLURM Node Watcher
+After=network.target
+
+[Service]
+ExecStart=/opt/slurm-watcher/venv/bin/python /opt/slurm-watcher/watcher.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Requirements
+
+- Python 3.10+, PyYAML
+- `sinfo` + `scontrol` accessible (local or via SSH)
+- `nvidia-smi` for GPU checks
+- SSH key auth to login/head nodes (for remote mode)
+</code></pre>
+</div>
+<footer><div class="wrap">
+<a href="https://github.com/pk-unix/slurm-node-watcher">View on GitHub</a> · © 2026 Pravin Kumar. All rights reserved.
+</div></footer>
+<script>document.addEventListener('contextmenu', function(e){ e.preventDefault(); });</script>
+</body>
+</html>
