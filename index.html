@@ -29,6 +29,19 @@ th{color:var(--muted);font-weight:600}
 a{color:var(--accent2)}
 footer{border-top:1px solid var(--border);margin-top:60px;padding:28px 0;color:var(--muted);font-size:13px}
 .note{background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;padding:12px 16px;margin:18px 0;font-size:14px;color:var(--muted)}
+
+.term-window{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:20px 0;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.term-titlebar{background:#1b222d;padding:9px 14px;display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--border)}
+.term-titlebar .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.term-titlebar .dot.r{background:#ff5f57}.term-titlebar .dot.y{background:#febc2e}.term-titlebar .dot.g{background:#28c840}
+.term-path{margin-left:12px;color:var(--muted);font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.term-body{background:#0a0d12;padding:18px 20px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:1.7;overflow-x:auto;white-space:pre}
+.term-prompt{color:#4ee16b}
+.term-ok{color:#4ee16b}
+.term-warn{color:#f2c14e}
+.term-err{color:#ff6b6b}
+.term-muted{color:var(--muted)}
+.term-cyan{color:#7cd6ff}
 </style>
 </head>
 <body>
@@ -36,10 +49,36 @@ footer{border-top:1px solid var(--border);margin-top:60px;padding:28px 0;color:v
 <div class="wrap">
 <div class="hero" id="top">
 <h1>slurm-node-watcher</h1>
-<p>- SSH key auth to login/head nodes (for remote mode)</p>
+<p>A lightweight Python daemon that continuously monitors SLURM cluster node health, auto-drains nodes matching configurable fault policies (XID GPU errors, hardware faults, FAIL state), and sends Slack alerts. Includes a standalone <code>gpu_check.py</code> for instant GPU health snapshots via <code>nvidia-smi</code>.</p>
 </div>
 
 <div class="clone-box">git clone https://github.com/pk-unix/slurm-node-watcher.git<br>cd slurm-node-watcher</div>
+<h2>What it looks like</h2>
+<div class="term-window">
+  <div class="term-titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-path">~/slurm-node-watcher</span></div>
+  <div class="term-body"><span class="term-prompt">$</span> python watcher.py --dry-run --check-once
+<span class="term-muted">[19:12:03]</span> Polling sinfo -R across 4 partitions...
+<span class="term-muted">[19:12:03]</span> gpu-node-041  reason="XID 79 — GPU fell off bus"       <span class="term-warn">policy match: gpu_fault</span>
+<span class="term-muted">[19:12:03]</span> <span class="term-warn">[DRY-RUN] would drain gpu-node-041 (policy: gpu_fault)</span>
+<span class="term-muted">[19:12:03]</span> gpu-node-058  reason="Not responding"               <span class="term-warn">policy match: unresponsive</span>
+<span class="term-muted">[19:12:03]</span> <span class="term-warn">[DRY-RUN] would drain gpu-node-058 (policy: unresponsive)</span>
+<span class="term-muted">[19:12:03]</span> Checked 512 nodes, 2 policy matches, 0 actions taken (dry-run)
+
+<span class="term-prompt">$</span> python watcher.py
+<span class="term-muted">[19:15:00]</span> gpu-node-041  reason="XID 79 — GPU fell off bus"
+<span class="term-err">[19:15:00] DRAIN: gpu-node-041 → scontrol update NodeName=gpu-node-041 State=drain Reason="auto: gpu_fault"</span>
+<span class="term-ok">[19:15:00] Slack alert sent to #gpu-fleet-alerts</span>
+
+<span class="term-prompt">$</span> python gpu_check.py --host gpu-node-041
+GPU   Name                           Temp  Util%   Mem MB    ECC PState
+----------------------------------------------------------------------
+0     NVIDIA H100 SXM5 80GB          <span class="term-err">91°</span>    <span class="term-err">0%</span>  <span class="term-muted">0/81920</span>          <span class="term-err">3</span> P0
+
+<span class="term-err">CRITICAL: GPU 0 unresponsive, 3 uncorrected ECC errors</span>
+exit 1</div>
+</div>
+<p class="note">This is an illustrative example of real daemon/log output &mdash; actual behavior depends on your cluster and watcher.yaml policies.</p>
+
 <h2>Source</h2>
 <h3>gpu_check.py</h3>
 <pre><code class="language-python">#!/usr/bin/env python3
